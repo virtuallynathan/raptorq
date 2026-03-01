@@ -32,6 +32,8 @@ mod operation_vector;
 mod pi_solver;
 #[cfg(feature = "python")]
 mod python;
+#[cfg(feature = "std")]
+mod replay_pool;
 mod rng;
 mod sparse_matrix;
 mod sparse_vec;

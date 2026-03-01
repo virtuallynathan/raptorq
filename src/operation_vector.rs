@@ -1,11 +1,12 @@
 #[cfg(feature = "std")]
-use std::{thread, vec::Vec};
+use std::vec::Vec;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
 use crate::octet::Octet;
-use crate::octets::{add_assign, fused_addassign_mul_scalar, mulassign_scalar};
+#[cfg(feature = "std")]
+use crate::replay_pool::global_replay_pool;
 use crate::symbol_slab::SymbolSlab;
 #[cfg(feature = "serde_support")]
 use serde::{Deserialize, Serialize};
@@ -49,9 +50,74 @@ pub fn perform_op(op: &SymbolOps, symbols: &mut SymbolSlab) {
     }
 }
 
-fn perform_ops_sequential(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
-    for op in ops {
-        perform_op(op, symbols);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReplayOp {
+    AddAssign { dest: u32, src: u32 },
+    MulAssign { dest: u32, scalar: Octet },
+    FMA { dest: u32, src: u32, scalar: Octet },
+    Reorder { order: Vec<usize> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplaySchedule {
+    ops: Vec<ReplayOp>,
+}
+
+impl ReplaySchedule {
+    #[inline]
+    pub fn from_symbol_ops(ops: &[SymbolOps]) -> Self {
+        let mut replay_ops = Vec::with_capacity(ops.len());
+        for op in ops {
+            match op {
+                SymbolOps::AddAssign { dest, src } => replay_ops.push(ReplayOp::AddAssign {
+                    dest: u32::try_from(*dest).expect("symbol index overflow"),
+                    src: u32::try_from(*src).expect("symbol index overflow"),
+                }),
+                SymbolOps::MulAssign { dest, scalar } => replay_ops.push(ReplayOp::MulAssign {
+                    dest: u32::try_from(*dest).expect("symbol index overflow"),
+                    scalar: scalar.clone(),
+                }),
+                SymbolOps::FMA { dest, src, scalar } => replay_ops.push(ReplayOp::FMA {
+                    dest: u32::try_from(*dest).expect("symbol index overflow"),
+                    src: u32::try_from(*src).expect("symbol index overflow"),
+                    scalar: scalar.clone(),
+                }),
+                SymbolOps::Reorder { order } => replay_ops.push(ReplayOp::Reorder {
+                    order: order.clone(),
+                }),
+            }
+        }
+
+        ReplaySchedule { ops: replay_ops }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[ReplayOp] {
+        &self.ops
+    }
+}
+
+#[inline]
+fn perform_replay_op(op: &ReplayOp, symbols: &mut SymbolSlab) {
+    match op {
+        ReplayOp::AddAssign { dest, src } => {
+            symbols.add_assign(*dest as usize, *src as usize);
+        }
+        ReplayOp::MulAssign { dest, scalar } => {
+            symbols.mulassign_scalar(*dest as usize, scalar);
+        }
+        ReplayOp::FMA { dest, src, scalar } => {
+            symbols.fma(*dest as usize, *src as usize, scalar);
+        }
+        ReplayOp::Reorder { order } => {
+            symbols.reorder(order);
+        }
+    }
+}
+
+fn perform_replay_schedule_sequential(schedule: &ReplaySchedule, symbols: &mut SymbolSlab) {
+    for op in schedule.as_slice() {
+        perform_replay_op(op, symbols);
     }
 }
 
@@ -63,84 +129,26 @@ fn should_parallelize(op_count: usize, symbol_count: usize, symbol_size: usize) 
 }
 
 #[cfg(feature = "std")]
-unsafe fn replay_ops_chunk(
-    data_addr: usize,
-    symbol_count: usize,
-    symbol_size: usize,
-    ops: &[SymbolOps],
-    chunk_start: usize,
-    chunk_end: usize,
-) {
-    let width = chunk_end - chunk_start;
-    if width == 0 {
-        return;
-    }
-    let data_ptr = data_addr as *mut u8;
-
-    for op in ops {
-        match op {
-            SymbolOps::AddAssign { dest, src } => {
-                debug_assert!(*dest < symbol_count);
-                debug_assert!(*src < symbol_count);
-                debug_assert_ne!(*dest, *src);
-                let dest_offset = *dest * symbol_size + chunk_start;
-                let src_offset = *src * symbol_size + chunk_start;
-                let (dest_slice, src_slice) = unsafe {
-                    (
-                        core::slice::from_raw_parts_mut(data_ptr.add(dest_offset), width),
-                        core::slice::from_raw_parts(data_ptr.add(src_offset), width),
-                    )
-                };
-                add_assign(dest_slice, src_slice);
-            }
-            SymbolOps::MulAssign { dest, scalar } => {
-                debug_assert!(*dest < symbol_count);
-                let dest_offset = *dest * symbol_size + chunk_start;
-                let dest_slice =
-                    unsafe { core::slice::from_raw_parts_mut(data_ptr.add(dest_offset), width) };
-                mulassign_scalar(dest_slice, scalar);
-            }
-            SymbolOps::FMA { dest, src, scalar } => {
-                debug_assert!(*dest < symbol_count);
-                debug_assert!(*src < symbol_count);
-                debug_assert_ne!(*dest, *src);
-                let dest_offset = *dest * symbol_size + chunk_start;
-                let src_offset = *src * symbol_size + chunk_start;
-                let (dest_slice, src_slice) = unsafe {
-                    (
-                        core::slice::from_raw_parts_mut(data_ptr.add(dest_offset), width),
-                        core::slice::from_raw_parts(data_ptr.add(src_offset), width),
-                    )
-                };
-                fused_addassign_mul_scalar(dest_slice, src_slice, scalar);
-            }
-            SymbolOps::Reorder { .. } => unreachable!(),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-fn perform_ops_parallel(ops: &[SymbolOps], symbols: &mut SymbolSlab) -> bool {
-    let available_parallelism = thread::available_parallelism()
-        .map(|x| x.get())
-        .unwrap_or(1);
+fn perform_replay_schedule_parallel(schedule: &ReplaySchedule, symbols: &mut SymbolSlab) -> bool {
+    let pool = global_replay_pool();
+    let available_parallelism = pool.max_workers();
     if available_parallelism <= 1 {
         return false;
     }
 
+    let ops = schedule.as_slice();
     let reorder_pos = ops
         .iter()
-        .position(|op| matches!(op, SymbolOps::Reorder { .. }));
+        .position(|op| matches!(op, ReplayOp::Reorder { .. }));
     if let Some(pos) = reorder_pos {
         if pos + 1 != ops.len() {
             return false;
         }
     }
     let replay_ops = &ops[..reorder_pos.unwrap_or(ops.len())];
-    if replay_ops
-        .iter()
-        .any(|op| matches!(op, SymbolOps::AddAssign { dest, src } | SymbolOps::FMA { dest, src, .. } if dest == src))
-    {
+    if replay_ops.iter().any(|op| {
+        matches!(op, ReplayOp::AddAssign { dest, src } | ReplayOp::FMA { dest, src, .. } if dest == src)
+    }) {
         return false;
     }
 
@@ -157,35 +165,26 @@ fn perform_ops_parallel(ops: &[SymbolOps], symbols: &mut SymbolSlab) -> bool {
         return false;
     }
 
-    let chunk_size = symbol_size.div_ceil(worker_count);
-    let data_addr = symbols.data_ptr_mut() as usize;
-
-    thread::scope(|scope| {
-        for worker_idx in 0..worker_count {
-            let chunk_start = worker_idx * chunk_size;
-            if chunk_start >= symbol_size {
-                continue;
-            }
-            let chunk_end = (chunk_start + chunk_size).min(symbol_size);
-            scope.spawn(move || unsafe {
-                replay_ops_chunk(
-                    data_addr,
-                    symbol_count,
-                    symbol_size,
-                    replay_ops,
-                    chunk_start,
-                    chunk_end,
-                );
-            });
-        }
-    });
+    pool.replay_ops_chunked(replay_ops, symbols, worker_count);
 
     if let Some(pos) = reorder_pos {
-        if let SymbolOps::Reorder { order } = &ops[pos] {
+        if let ReplayOp::Reorder { order } = &ops[pos] {
             symbols.reorder(order);
         }
     }
     true
+}
+
+pub fn perform_replay_schedule_with_parallel_hint(
+    schedule: &ReplaySchedule,
+    symbols: &mut SymbolSlab,
+    parallel_hint: bool,
+) {
+    #[cfg(feature = "std")]
+    if parallel_hint && perform_replay_schedule_parallel(schedule, symbols) {
+        return;
+    }
+    perform_replay_schedule_sequential(schedule, symbols);
 }
 
 pub fn perform_ops_with_parallel_hint(
@@ -193,11 +192,8 @@ pub fn perform_ops_with_parallel_hint(
     symbols: &mut SymbolSlab,
     parallel_hint: bool,
 ) {
-    #[cfg(feature = "std")]
-    if parallel_hint && perform_ops_parallel(ops, symbols) {
-        return;
-    }
-    perform_ops_sequential(ops, symbols);
+    let schedule = ReplaySchedule::from_symbol_ops(ops);
+    perform_replay_schedule_with_parallel_hint(&schedule, symbols, parallel_hint);
 }
 
 #[allow(dead_code)]
@@ -211,7 +207,8 @@ mod tests {
     use std::vec::Vec;
 
     use crate::octet::Octet;
-    use crate::operation_vector::{SymbolOps, perform_op, perform_ops};
+    use crate::operation_vector::{ReplayOp, ReplaySchedule, SymbolOps, perform_op, perform_ops};
+    use crate::replay_pool::global_replay_pool;
     use crate::symbol::Symbol;
     use crate::symbol_slab::SymbolSlab;
 
@@ -365,6 +362,71 @@ mod tests {
             perform_op(op, &mut expected);
         }
         perform_ops(&ops, &mut actual);
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_replay_pool_chunked_matches_scalar_executor() {
+        let pool = global_replay_pool();
+        let worker_count = pool.max_workers().min(4);
+        if worker_count <= 1 {
+            return;
+        }
+
+        let symbol_count = 256;
+        let symbol_size = 640;
+        let mut symbols = Vec::with_capacity(symbol_count);
+        for _ in 0..symbol_count {
+            let mut row = vec![0u8; symbol_size];
+            for b in row.iter_mut() {
+                *b = rand::rng().random();
+            }
+            symbols.push(Symbol::new(row));
+        }
+
+        let mut expected = SymbolSlab::from_symbols(symbols.clone(), symbol_size);
+        let mut actual = SymbolSlab::from_symbols(symbols, symbol_size);
+
+        let mut ops = Vec::with_capacity(6_001);
+        for i in 0..6_000 {
+            let dest = rand::rng().random_range(0..symbol_count);
+            let mut src = rand::rng().random_range(0..symbol_count);
+            while src == dest {
+                src = rand::rng().random_range(0..symbol_count);
+            }
+            match i % 3 {
+                0 => ops.push(SymbolOps::AddAssign { dest, src }),
+                1 => ops.push(SymbolOps::MulAssign {
+                    dest,
+                    scalar: Octet::new(rand::rng().random_range(1..=255)),
+                }),
+                _ => ops.push(SymbolOps::FMA {
+                    dest,
+                    src,
+                    scalar: Octet::new(rand::rng().random_range(2..=255)),
+                }),
+            }
+        }
+
+        let mut reorder: Vec<usize> = (0..symbol_count).collect();
+        reorder.shuffle(&mut rand::rng());
+        ops.push(SymbolOps::Reorder { order: reorder });
+
+        for op in ops.iter() {
+            perform_op(op, &mut expected);
+        }
+
+        let schedule = ReplaySchedule::from_symbol_ops(&ops);
+        let schedule_ops = schedule.as_slice();
+        let reorder_pos = schedule_ops
+            .iter()
+            .position(|op| matches!(op, ReplayOp::Reorder { .. }))
+            .expect("reorder op missing");
+        pool.replay_ops_chunked(&schedule_ops[..reorder_pos], &mut actual, worker_count);
+        if let ReplayOp::Reorder { order } = &schedule_ops[reorder_pos] {
+            actual.reorder(order);
+        }
 
         assert_eq!(expected, actual);
     }

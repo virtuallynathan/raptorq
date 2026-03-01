@@ -14,7 +14,9 @@ use crate::matrix::BinaryMatrix;
 use crate::octet::Octet;
 use crate::octet_matrix::DenseOctetMatrix;
 use crate::octets::BinaryOctetVec;
-use crate::operation_vector::{SymbolOps, perform_ops_with_parallel_hint};
+use crate::operation_vector::{
+    ReplaySchedule, SymbolOps, perform_replay_schedule_with_parallel_hint,
+};
 use crate::symbol::Symbol;
 use crate::symbol_slab::SymbolSlab;
 use crate::systematic_constants::num_hdpc_symbols;
@@ -579,7 +581,8 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
     fn apply_deferred_symbol_ops(&mut self) {
         let has_overhead = self.initial_row_count > self.L;
         let parallel_hint = has_overhead && self.num_source_symbols >= 20_000;
-        perform_ops_with_parallel_hint(&self.deferred_D_ops, &mut self.D, parallel_hint);
+        let schedule = ReplaySchedule::from_symbol_ops(&self.deferred_D_ops);
+        perform_replay_schedule_with_parallel_hint(&schedule, &mut self.D, parallel_hint);
     }
 
     // Returns true iff all elements in A between [start_row, end_row)
