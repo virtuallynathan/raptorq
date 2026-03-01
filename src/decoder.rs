@@ -307,6 +307,46 @@ impl SourceBlockDecoder {
         Some(result)
     }
 
+    fn select_overhead_repair_indices(
+        &self,
+        num_padding_symbols: u32,
+        required_repairs: usize,
+    ) -> Vec<usize> {
+        if self.repair_packets.len() <= required_repairs {
+            return (0..self.repair_packets.len()).collect();
+        }
+
+        let lt_symbols = num_lt_symbols(self.source_block_symbols);
+        let pi_symbols = num_pi_symbols(self.source_block_symbols);
+        let sys_index = systematic_index(self.source_block_symbols);
+        let p1 = calculate_p1(self.source_block_symbols);
+
+        let mut candidates = Vec::with_capacity(self.repair_packets.len());
+        for (index, packet) in self.repair_packets.iter().enumerate() {
+            let isi = packet.payload_id.encoding_symbol_id() + num_padding_symbols;
+            let mut degree = 0usize;
+            enc_indices(
+                intermediate_tuple(isi, lt_symbols, sys_index, p1),
+                lt_symbols,
+                pi_symbols,
+                p1,
+                |_| degree += 1,
+            );
+            candidates.push((index, degree, packet.payload_id.encoding_symbol_id()));
+        }
+
+        candidates.sort_by_key(|(_, degree, esi)| (*degree, *esi));
+
+        let extra_repairs = self.repair_packets.len() - required_repairs;
+        let target_count = required_repairs + extra_repairs.min(16);
+        let mut selected: Vec<usize> = candidates
+            .into_iter()
+            .take(target_count)
+            .map(|(index, _, _)| index)
+            .collect();
+        selected.sort_unstable();
+        selected
+    }
     pub fn decode<T: IntoIterator<Item = EncodingPacket>>(
         &mut self,
         packets: T,
@@ -357,6 +397,18 @@ impl SourceBlockDecoder {
         let h = num_hdpc_symbols(self.source_block_symbols) as usize;
         let l = num_intermediate_symbols(self.source_block_symbols) as usize;
 
+        let known_extended_symbols =
+            self.received_source_symbols as usize + num_padding_symbols as usize;
+        let required_repairs = num_extended_symbols as usize - known_extended_symbols;
+        let extra_repairs = self.repair_packets.len().saturating_sub(required_repairs);
+        let use_overhead_subset =
+            extra_repairs > 0 && self.source_block_symbols <= 20_000 && extra_repairs <= 64;
+        let selected_repair_indices = if use_overhead_subset {
+            self.select_overhead_repair_indices(num_padding_symbols, required_repairs)
+        } else {
+            (0..self.repair_packets.len()).collect()
+        };
+
         let mut encoded_isis = vec![];
         for (i, source) in self.source_symbols.iter().enumerate() {
             if source.is_some() {
@@ -366,7 +418,8 @@ impl SourceBlockDecoder {
         for i in self.source_block_symbols..num_extended_symbols {
             encoded_isis.push(i);
         }
-        for repair_packet in self.repair_packets.iter() {
+        for &repair_index in selected_repair_indices.iter() {
+            let repair_packet = &self.repair_packets[repair_index];
             encoded_isis.push(repair_packet.payload_id.encoding_symbol_id() + num_padding_symbols);
         }
 
@@ -381,7 +434,8 @@ impl SourceBlockDecoder {
             for _i in self.source_block_symbols..num_extended_symbols {
                 d_no_hdpc.push(Symbol::zero(self.symbol_size));
             }
-            for repair_packet in self.repair_packets.iter() {
+            for &repair_index in selected_repair_indices.iter() {
+                let repair_packet = &self.repair_packets[repair_index];
                 d_no_hdpc.push(Symbol::new(repair_packet.data.clone()));
             }
 
@@ -408,7 +462,7 @@ impl SourceBlockDecoder {
         // Case 3b: standard decode with HDPC rows (slab-backed)
         // See section 5.3.3.4.2. There are S + H zero symbols to start the D vector
         let num_padding = (num_extended_symbols - self.source_block_symbols) as usize;
-        let num_repair = self.repair_packets.len();
+        let num_repair = selected_repair_indices.len();
         let total = s + h + self.received_source_symbols as usize + num_padding + num_repair;
         let ss = self.symbol_size as usize;
         let mut d = SymbolSlab::with_zeros(total, ss);
@@ -421,7 +475,8 @@ impl SourceBlockDecoder {
             // Padding row already zero
             row += 1;
         }
-        for repair_packet in self.repair_packets.iter() {
+        for &repair_index in selected_repair_indices.iter() {
+            let repair_packet = &self.repair_packets[repair_index];
             d.get_mut(row).copy_from_slice(&repair_packet.data);
             row += 1;
         }
