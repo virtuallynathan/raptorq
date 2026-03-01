@@ -1,18 +1,16 @@
 #[cfg(feature = "std")]
-use std::{cmp::Ordering, mem::size_of, vec::Vec};
+use std::{cmp::Ordering, mem::size_of};
 
 #[cfg(not(feature = "std"))]
 use core::{cmp::Ordering, mem::size_of};
 
-#[cfg(not(feature = "std"))]
-use alloc::vec::Vec;
-
 use crate::octet::Octet;
+use smallvec::SmallVec;
 
 #[derive(Clone, Debug, PartialEq, PartialOrd, Eq, Ord, Hash)]
 pub struct SparseBinaryVec {
     // Kept sorted by the usize (key). Only ones are stored, zeros are implicit
-    elements: Vec<u16>,
+    elements: SmallVec<[u16; 8]>,
 }
 
 impl SparseBinaryVec {
@@ -20,7 +18,7 @@ impl SparseBinaryVec {
         // Matrix width can never exceed maximum L
         debug_assert!(capacity < 65536);
         SparseBinaryVec {
-            elements: Vec::with_capacity(capacity),
+            elements: SmallVec::with_capacity(capacity),
         }
     }
 
@@ -31,7 +29,11 @@ impl SparseBinaryVec {
     }
 
     pub fn size_in_bytes(&self) -> usize {
-        size_of::<Self>() + size_of::<u16>() * self.elements.len()
+        if self.elements.spilled() {
+            size_of::<Self>() + size_of::<u16>() * self.elements.capacity()
+        } else {
+            size_of::<Self>()
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -60,7 +62,8 @@ impl SparseBinaryVec {
             return false;
         }
 
-        let mut result = Vec::with_capacity(self.elements.len() + other.elements.len());
+        let mut result: SmallVec<[u16; 8]> =
+            SmallVec::with_capacity(self.elements.len() + other.elements.len());
         let mut self_iter = self.elements.iter();
         let mut other_iter = other.elements.iter();
         let mut self_next = self_iter.next();
