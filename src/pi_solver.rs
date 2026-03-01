@@ -581,7 +581,7 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
     #[inline(never)]
     fn apply_deferred_symbol_ops(&mut self) {
         let has_overhead = self.initial_row_count > self.L;
-        let parallel_hint = has_overhead && self.num_source_symbols >= 20_000;
+        let parallel_hint = has_overhead && self.num_source_symbols >= 50_000;
         if parallel_hint {
             let schedule = ReplaySchedule::from_symbol_ops(&self.deferred_D_ops);
             perform_replay_schedule_with_parallel_hint(&schedule, &mut self.D, true);
