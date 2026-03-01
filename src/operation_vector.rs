@@ -57,8 +57,9 @@ fn perform_ops_sequential(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
 
 #[cfg(feature = "std")]
 fn should_parallelize(op_count: usize, symbol_count: usize, symbol_size: usize) -> bool {
-    // Keep small jobs on the sequential fast path.
-    op_count >= 1_024 && symbol_count >= 512 && symbol_size >= 512
+    // Keep all but very large workloads on the sequential fast path; thread spawn
+    // overhead dominates medium-size blocks.
+    op_count >= 20_000 && symbol_count >= 4_000 && symbol_size >= 1_024
 }
 
 #[cfg(feature = "std")]
@@ -187,12 +188,21 @@ fn perform_ops_parallel(ops: &[SymbolOps], symbols: &mut SymbolSlab) -> bool {
     true
 }
 
-pub fn perform_ops(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
+pub fn perform_ops_with_parallel_hint(
+    ops: &[SymbolOps],
+    symbols: &mut SymbolSlab,
+    parallel_hint: bool,
+) {
     #[cfg(feature = "std")]
-    if perform_ops_parallel(ops, symbols) {
+    if parallel_hint && perform_ops_parallel(ops, symbols) {
         return;
     }
     perform_ops_sequential(ops, symbols);
+}
+
+#[allow(dead_code)]
+pub fn perform_ops(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
+    perform_ops_with_parallel_hint(ops, symbols, true);
 }
 #[cfg(feature = "std")]
 #[cfg(test)]

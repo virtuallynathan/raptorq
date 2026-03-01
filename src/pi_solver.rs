@@ -14,7 +14,7 @@ use crate::matrix::BinaryMatrix;
 use crate::octet::Octet;
 use crate::octet_matrix::DenseOctetMatrix;
 use crate::octets::BinaryOctetVec;
-use crate::operation_vector::{SymbolOps, perform_ops};
+use crate::operation_vector::{SymbolOps, perform_ops_with_parallel_hint};
 use crate::symbol::Symbol;
 use crate::symbol_slab::SymbolSlab;
 use crate::systematic_constants::num_hdpc_symbols;
@@ -445,6 +445,7 @@ pub struct IntermediateSymbolDecoder<T: BinaryMatrix> {
     // Operations on D are deferred to the end of the codec to improve cache hits
     deferred_D_ops: Vec<SymbolOps>,
     num_source_symbols: u32,
+    initial_row_count: usize,
     debug_symbol_mul_ops: u32,
     debug_symbol_add_ops: u32,
     debug_symbol_mul_ops_by_phase: Vec<u32>,
@@ -498,6 +499,7 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
             L: intermediate_symbols,
             deferred_D_ops: Vec::with_capacity(70 * intermediate_symbols),
             num_source_symbols,
+            initial_row_count: num_rows,
             debug_symbol_mul_ops: 0,
             debug_symbol_add_ops: 0,
             debug_symbol_mul_ops_by_phase: vec![0; 5],
@@ -547,6 +549,7 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
         #[cfg(debug_assertions)]
         X.resize(X.height(), X.width() - pi_symbols);
 
+        let num_rows = matrix.height();
         let mut A = matrix;
         A.enable_column_access_acceleration();
 
@@ -563,6 +566,7 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
             L: intermediate_symbols,
             deferred_D_ops: Vec::with_capacity(70 * intermediate_symbols),
             num_source_symbols,
+            initial_row_count: num_rows,
             debug_symbol_mul_ops: 0,
             debug_symbol_add_ops: 0,
             debug_symbol_mul_ops_by_phase: vec![0; 5],
@@ -573,7 +577,9 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
 
     #[inline(never)]
     fn apply_deferred_symbol_ops(&mut self) {
-        perform_ops(&self.deferred_D_ops, &mut self.D);
+        let has_overhead = self.initial_row_count > self.L;
+        let parallel_hint = has_overhead && self.num_source_symbols >= 20_000;
+        perform_ops_with_parallel_hint(&self.deferred_D_ops, &mut self.D, parallel_hint);
     }
 
     // Returns true iff all elements in A between [start_row, end_row)
