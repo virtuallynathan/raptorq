@@ -227,6 +227,93 @@ impl SourceBlockDecoder {
         return Some(result);
     }
 
+    fn select_overhead_repair_indices(
+        &self,
+        num_padding_symbols: u32,
+        required_repairs: usize,
+    ) -> Vec<usize> {
+        if self.repair_packets.len() <= required_repairs {
+            return (0..self.repair_packets.len()).collect();
+        }
+
+        let lt_symbols = num_lt_symbols(self.source_block_symbols);
+        let pi_symbols = num_pi_symbols(self.source_block_symbols);
+        let sys_index = systematic_index(self.source_block_symbols);
+        let p1 = calculate_p1(self.source_block_symbols);
+
+        let mut candidates = Vec::with_capacity(self.repair_packets.len());
+        for (index, packet) in self.repair_packets.iter().enumerate() {
+            let isi = packet.payload_id.encoding_symbol_id() + num_padding_symbols;
+            let degree = enc_indices(
+                intermediate_tuple(isi, lt_symbols, sys_index, p1),
+                lt_symbols,
+                pi_symbols,
+                p1,
+            )
+            .len();
+            candidates.push((index, degree, packet.payload_id.encoding_symbol_id()));
+        }
+
+        candidates.sort_by_key(|(_, degree, esi)| (*degree, *esi));
+
+        let extra_repairs = self.repair_packets.len() - required_repairs;
+        let target_count = required_repairs + extra_repairs.min(16);
+        let mut selected: Vec<usize> = candidates
+            .into_iter()
+            .take(target_count)
+            .map(|(index, _, _)| index)
+            .collect();
+        selected.sort_unstable();
+        selected
+    }
+
+    fn try_decode_with_repair_indices(
+        &mut self,
+        num_extended_symbols: u32,
+        num_padding_symbols: u32,
+        repair_indices: &[usize],
+    ) -> Option<Vec<u8>> {
+        let s = num_ldpc_symbols(self.source_block_symbols) as usize;
+        let h = num_hdpc_symbols(self.source_block_symbols) as usize;
+
+        let mut encoded_isis = vec![];
+        // See section 5.3.3.4.2. There are S + H zero symbols to start the D vector
+        let mut d = vec![Symbol::zero(self.symbol_size); s + h];
+        for (i, source) in self.source_symbols.iter().enumerate() {
+            if let Some(symbol) = source {
+                encoded_isis.push(i as u32);
+                d.push(symbol.clone());
+            }
+        }
+
+        // Append the extended padding symbols
+        for i in self.source_block_symbols..num_extended_symbols {
+            encoded_isis.push(i);
+            d.push(Symbol::zero(self.symbol_size));
+        }
+
+        // Append the selected repair symbols
+        for &repair_index in repair_indices {
+            let repair_packet = &self.repair_packets[repair_index];
+            // We need to convert from ESI to ISI
+            encoded_isis.push(repair_packet.payload_id.encoding_symbol_id() + num_padding_symbols);
+            d.push(Symbol::new(repair_packet.data.clone()));
+        }
+
+        if num_extended_symbols >= self.sparse_threshold {
+            let (constraint_matrix, hdpc) = generate_constraint_matrix::<SparseBinaryMatrix>(
+                self.source_block_symbols,
+                &encoded_isis,
+            );
+            self.try_pi_decode(constraint_matrix, hdpc, d)
+        } else {
+            let (constraint_matrix, hdpc) = generate_constraint_matrix::<DenseBinaryMatrix>(
+                self.source_block_symbols,
+                &encoded_isis,
+            );
+            self.try_pi_decode(constraint_matrix, hdpc, d)
+        }
+    }
     pub fn decode<T: IntoIterator<Item = EncodingPacket>>(
         &mut self,
         packets: T,
@@ -273,45 +360,47 @@ impl SourceBlockDecoder {
         }
 
         // Case 3: we may have sufficient symbols to do a standard decoding
-        let s = num_ldpc_symbols(self.source_block_symbols) as usize;
-        let h = num_hdpc_symbols(self.source_block_symbols) as usize;
+        let known_extended_symbols =
+            self.received_source_symbols as usize + num_padding_symbols as usize;
+        let required_repairs = num_extended_symbols as usize - known_extended_symbols;
+        let extra_repairs = self.repair_packets.len().saturating_sub(required_repairs);
 
-        let mut encoded_isis = vec![];
-        // See section 5.3.3.4.2. There are S + H zero symbols to start the D vector
-        let mut d = vec![Symbol::zero(self.symbol_size); s + h];
-        for (i, source) in self.source_symbols.iter().enumerate() {
-            if let Some(symbol) = source {
-                encoded_isis.push(i as u32);
-                d.push(symbol.clone());
+        // Overhead-aware subset selection helps at moderate block sizes but can hurt
+        // very large-K tails where coverage matters more than degree minimization.
+        let use_overhead_subset =
+            extra_repairs > 0 && self.source_block_symbols <= 20_000 && extra_repairs <= 64;
+
+        if use_overhead_subset {
+            let selected_repair_indices =
+                self.select_overhead_repair_indices(num_padding_symbols, required_repairs);
+
+            if let Some(decoded) = self.try_decode_with_repair_indices(
+                num_extended_symbols,
+                num_padding_symbols,
+                &selected_repair_indices,
+            ) {
+                return Some(decoded);
             }
+
+            // If the overhead-aware subset fails, retry once using all available repairs.
+            if selected_repair_indices.len() != self.repair_packets.len() {
+                let all_repair_indices: Vec<usize> = (0..self.repair_packets.len()).collect();
+                return self.try_decode_with_repair_indices(
+                    num_extended_symbols,
+                    num_padding_symbols,
+                    &all_repair_indices,
+                );
+            }
+
+            return None;
         }
 
-        // Append the extended padding symbols
-        for i in self.source_block_symbols..num_extended_symbols {
-            encoded_isis.push(i);
-            d.push(Symbol::zero(self.symbol_size));
-        }
-
-        // Append the received repair symbols
-        for repair_packet in self.repair_packets.iter() {
-            // We need to convert from ESI to ISI
-            encoded_isis.push(repair_packet.payload_id.encoding_symbol_id() + num_padding_symbols);
-            d.push(Symbol::new(repair_packet.data.clone()));
-        }
-
-        if num_extended_symbols >= self.sparse_threshold {
-            let (constraint_matrix, hdpc) = generate_constraint_matrix::<SparseBinaryMatrix>(
-                self.source_block_symbols,
-                &encoded_isis,
-            );
-            self.try_pi_decode(constraint_matrix, hdpc, d)
-        } else {
-            let (constraint_matrix, hdpc) = generate_constraint_matrix::<DenseBinaryMatrix>(
-                self.source_block_symbols,
-                &encoded_isis,
-            );
-            self.try_pi_decode(constraint_matrix, hdpc, d)
-        }
+        let all_repair_indices: Vec<usize> = (0..self.repair_packets.len()).collect();
+        self.try_decode_with_repair_indices(
+            num_extended_symbols,
+            num_padding_symbols,
+            &all_repair_indices,
+        )
     }
 
     fn rebuild_source_symbol(
