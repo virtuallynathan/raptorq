@@ -50,6 +50,13 @@ pub fn perform_op(op: &SymbolOps, symbols: &mut SymbolSlab) {
     }
 }
 
+#[inline]
+fn perform_symbol_ops_sequential(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
+    for op in ops {
+        perform_op(op, symbols);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayOp {
     AddAssign { dest: u32, src: u32 },
@@ -192,8 +199,13 @@ pub fn perform_ops_with_parallel_hint(
     symbols: &mut SymbolSlab,
     parallel_hint: bool,
 ) {
+    if !parallel_hint {
+        perform_symbol_ops_sequential(ops, symbols);
+        return;
+    }
+
     let schedule = ReplaySchedule::from_symbol_ops(ops);
-    perform_replay_schedule_with_parallel_hint(&schedule, symbols, parallel_hint);
+    perform_replay_schedule_with_parallel_hint(&schedule, symbols, true);
 }
 
 #[allow(dead_code)]
