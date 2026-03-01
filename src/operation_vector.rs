@@ -136,6 +136,8 @@ fn should_parallelize(op_count: usize, symbol_count: usize, symbol_size: usize) 
     op_count >= 30_000 && symbol_count >= 4_000 && symbol_size >= 1_024
 }
 
+#[cold]
+#[inline(never)]
 #[cfg(feature = "std")]
 fn perform_replay_schedule_parallel(schedule: &ReplaySchedule, symbols: &mut SymbolSlab) -> bool {
     let pool = global_replay_pool();
@@ -185,6 +187,7 @@ fn perform_replay_schedule_parallel(schedule: &ReplaySchedule, symbols: &mut Sym
     true
 }
 
+#[cold]
 pub fn perform_replay_schedule_with_parallel_hint(
     schedule: &ReplaySchedule,
     symbols: &mut SymbolSlab,
