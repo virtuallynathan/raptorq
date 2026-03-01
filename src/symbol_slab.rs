@@ -74,6 +74,11 @@ impl SymbolSlab {
         self.symbol_size
     }
 
+    #[inline]
+    pub(crate) fn data_ptr_mut(&mut self) -> *mut u8 {
+        self.data.as_mut_ptr()
+    }
+
     /// Borrow symbol `i` as a byte slice.
     #[inline]
     pub fn get(&self, i: usize) -> &[u8] {
