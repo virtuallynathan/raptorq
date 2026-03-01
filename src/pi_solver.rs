@@ -337,16 +337,18 @@ impl FirstPhaseRowSelectionStats {
     }
 
     #[inline(never)]
-    fn first_phase_original_degree_substep(
+    fn first_phase_original_degree_substep<T: BinaryMatrix>(
         &self,
         start_row: usize,
         end_row: usize,
         r: usize,
+        matrix: &T,
     ) -> usize {
         // There's no need for special handling of HDPC rows, since Errata 2 guarantees we won't
         // select any, and they're excluded in the first_phase solver
         let mut chosen = None;
         let mut chosen_original_degree = u16::MAX;
+        let mut chosen_markowitz = usize::MAX;
         // Fast path for r=1, since this is super common
         if r == 1 {
             assert_ne!(0, self.rows_with_single_one.len());
@@ -360,10 +362,28 @@ impl FirstPhaseRowSelectionStats {
         } else {
             for row in start_row..end_row {
                 let ones = self.ones_per_row.get(row);
+                if ones as usize != r {
+                    continue;
+                }
+                let mut col_cost = 0usize;
+                for (col, value) in matrix.get_row_iter(row, self.start_col, self.end_col) {
+                    if value == Octet::one() {
+                        let col_nnz = matrix.get_ones_in_column(col, start_row, end_row).len();
+                        col_cost = col_cost.saturating_add(col_nnz.saturating_sub(1));
+                        if col_cost >= chosen_markowitz {
+                            break;
+                        }
+                    }
+                }
+                let markowitz = (r - 1).saturating_mul(col_cost);
                 let row_original_degree = self.original_degree.get(row);
-                if ones as usize == r && row_original_degree < chosen_original_degree {
+                if markowitz < chosen_markowitz
+                    || (markowitz == chosen_markowitz
+                        && row_original_degree < chosen_original_degree)
+                {
                     chosen = Some(row);
                     chosen_original_degree = row_original_degree;
+                    chosen_markowitz = markowitz;
                 }
             }
         }
@@ -413,7 +433,8 @@ impl FirstPhaseRowSelectionStats {
             let row = self.first_phase_graph_substep(start_row, end_row, matrix);
             return (Some(row), r);
         } else {
-            let row = self.first_phase_original_degree_substep(start_row, end_row, r.unwrap());
+            let row =
+                self.first_phase_original_degree_substep(start_row, end_row, r.unwrap(), matrix);
             return (Some(row), r);
         }
     }
