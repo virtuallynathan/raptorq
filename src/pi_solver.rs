@@ -14,7 +14,7 @@ use crate::matrix::BinaryMatrix;
 use crate::octet::Octet;
 use crate::octet_matrix::DenseOctetMatrix;
 use crate::octets::BinaryOctetVec;
-use crate::operation_vector::SymbolOps;
+use crate::operation_vector::{SymbolOps, perform_ops};
 use crate::symbol::Symbol;
 use crate::symbol_slab::SymbolSlab;
 use crate::systematic_constants::num_hdpc_symbols;
@@ -573,20 +573,7 @@ impl<T: BinaryMatrix> IntermediateSymbolDecoder<T> {
 
     #[inline(never)]
     fn apply_deferred_symbol_ops(&mut self) {
-        for op in self.deferred_D_ops.iter() {
-            match op {
-                SymbolOps::AddAssign { dest, src } => {
-                    self.D.add_assign(*dest, *src);
-                }
-                SymbolOps::MulAssign { dest, scalar } => {
-                    self.D.mulassign_scalar(*dest, scalar);
-                }
-                SymbolOps::FMA { dest, src, scalar } => {
-                    self.D.fma(*dest, *src, scalar);
-                }
-                SymbolOps::Reorder { order: _order } => {}
-            }
-        }
+        perform_ops(&self.deferred_D_ops, &mut self.D);
     }
 
     // Returns true iff all elements in A between [start_row, end_row)
