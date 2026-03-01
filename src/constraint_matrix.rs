@@ -231,9 +231,9 @@ pub fn generate_constraint_matrix_no_hdpc<T: BinaryMatrix>(
     let p1 = calculate_p1(Kprime as u32);
     for (row, &i) in encoded_symbol_indices.iter().enumerate() {
         let tuple = intermediate_tuple(i, lt_symbols, sys_index, p1);
-        for j in enc_indices(tuple, lt_symbols, pi_symbols, p1) {
+        enc_indices(tuple, lt_symbols, pi_symbols, p1, |j| {
             matrix.set(row + S, j, Octet::one());
-        }
+        });
     }
 
     matrix
