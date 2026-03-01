@@ -15,6 +15,7 @@ crate-type = ["lib"]
 [dependencies]
 serde = {version = "1.0.102", features=["std", "derive"], optional = true}
 pyo3 = {version = "0.24.1", features=["extension-module", "abi3-py37"], optional = true }
+smallvec = { version = "1.13", default-features = false }
 
 [dev-dependencies]
 criterion = "0.5"
