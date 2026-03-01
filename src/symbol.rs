@@ -27,6 +27,7 @@ impl Symbol {
     }
 
     /// Initialize a zeroed symbol, with given size.
+    #[allow(dead_code)]
     pub fn zero<T>(size: T) -> Symbol
     where
         T: Into<usize>,
@@ -47,14 +48,17 @@ impl Symbol {
     }
 
     /// Consume a symbol into a vector of bytes.
+    #[allow(dead_code)]
     pub fn into_bytes(self) -> Vec<u8> {
         self.value
     }
 
+    #[allow(dead_code)]
     pub fn mulassign_scalar(&mut self, scalar: &Octet) {
         mulassign_scalar(&mut self.value, scalar);
     }
 
+    #[allow(dead_code)]
     pub fn fused_addassign_mul_scalar(&mut self, other: &Symbol, scalar: &Octet) {
         fused_addassign_mul_scalar(&mut self.value, &other.value, scalar);
     }
