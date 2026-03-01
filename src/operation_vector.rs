@@ -33,6 +33,7 @@ pub enum SymbolOps {
     },
 }
 
+#[inline(always)]
 pub fn perform_op(op: &SymbolOps, symbols: &mut SymbolSlab) {
     match op {
         SymbolOps::AddAssign { dest, src } => {
@@ -50,7 +51,7 @@ pub fn perform_op(op: &SymbolOps, symbols: &mut SymbolSlab) {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn perform_symbol_ops_sequential(ops: &[SymbolOps], symbols: &mut SymbolSlab) {
     for op in ops {
         perform_op(op, symbols);
@@ -104,7 +105,7 @@ impl ReplaySchedule {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn perform_replay_op(op: &ReplayOp, symbols: &mut SymbolSlab) {
     match op {
         ReplayOp::AddAssign { dest, src } => {
