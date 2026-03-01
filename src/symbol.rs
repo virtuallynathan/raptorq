@@ -41,6 +41,11 @@ impl Symbol {
         self.value.len()
     }
 
+    #[cfg(feature = "benchmarking")]
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
     /// Return the underlying byte slice for a symbol.
     pub fn as_bytes(&self) -> &[u8] {
         &self.value
