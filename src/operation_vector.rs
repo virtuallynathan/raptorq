@@ -130,9 +130,9 @@ fn perform_replay_schedule_sequential(schedule: &ReplaySchedule, symbols: &mut S
 
 #[cfg(feature = "std")]
 fn should_parallelize(op_count: usize, symbol_count: usize, symbol_size: usize) -> bool {
-    // Keep all but very large workloads on the sequential fast path; thread spawn
-    // overhead dominates medium-size blocks.
-    op_count >= 20_000 && symbol_count >= 4_000 && symbol_size >= 1_024
+    // Keep all but very large workloads on the sequential fast path; replay setup and
+    // synchronization overhead dominate medium-size blocks.
+    op_count >= 30_000 && symbol_count >= 4_000 && symbol_size >= 1_024
 }
 
 #[cfg(feature = "std")]
@@ -165,9 +165,11 @@ fn perform_replay_schedule_parallel(schedule: &ReplaySchedule, symbols: &mut Sym
         return false;
     }
 
+    let max_workers_by_chunk = symbol_size.div_ceil(256).max(1);
+    let max_workers_by_ops = replay_ops.len().div_ceil(12_000).max(1);
     let worker_count = available_parallelism
-        .min(symbol_size.max(1))
-        .min((symbol_size / 64).max(1));
+        .min(max_workers_by_chunk)
+        .min(max_workers_by_ops);
     if worker_count <= 1 {
         return false;
     }

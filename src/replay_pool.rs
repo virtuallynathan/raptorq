@@ -136,6 +136,7 @@ pub(crate) fn global_replay_pool() -> &'static ReplayPool {
         let worker_count = thread::available_parallelism()
             .map(|x| x.get())
             .unwrap_or(1)
+            .min(16)
             .max(1);
         ReplayPool::new(worker_count)
     })
