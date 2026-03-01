@@ -418,10 +418,24 @@ impl SourceBlockEncoder {
     /// Equivalent to `repair_packets(repair_symbol_id, 1).pop().unwrap()`,
     /// but avoids allocating the outer `Vec`.
     pub fn repair_packet(&self, repair_symbol_id: u32) -> EncodingPacket {
-        let symbol_size = self.source_symbols[0].as_bytes().len();
-        let mut data = vec![0u8; symbol_size];
-        let payload_id = self.repair_symbol_into(repair_symbol_id, &mut data);
-        EncodingPacket::new(payload_id, data)
+        let encoding_symbol_id =
+            repair_symbol_id + extended_source_block_symbols(self.source_symbols.len() as u32);
+        let lt_symbols = num_lt_symbols(self.source_symbols.len() as u32);
+        let sys_index = systematic_index(self.source_symbols.len() as u32);
+        let p1 = calculate_p1(self.source_symbols.len() as u32);
+        let tuple = intermediate_tuple(encoding_symbol_id, lt_symbols, sys_index, p1);
+        EncodingPacket::new(
+            PayloadId::new(
+                self.source_block_id,
+                self.source_symbols.len() as u32 + repair_symbol_id,
+            ),
+            enc(
+                self.source_symbols.len() as u32,
+                &self.intermediate_symbols,
+                tuple,
+            )
+            .into_bytes(),
+        )
     }
 
     /// Write a single repair symbol's data directly into `dest`.
@@ -447,7 +461,6 @@ impl SourceBlockEncoder {
             dest,
             self.source_symbols.len() as u32,
             &self.intermediate_symbols,
-            self.intermediate_symbol_mapping.as_deref(),
             tuple,
         );
         PayloadId::new(
@@ -584,22 +597,45 @@ fn enc_into(
     }
 }
 
-#[cfg(test)]
+// Allocation-free variant of enc(). Writes the encoded symbol directly into `dest`.
+// `dest` must be pre-sized to the symbol length.
 #[allow(clippy::many_single_char_names)]
-fn enc(
+fn enc_into(
+    dest: &mut [u8],
     source_block_symbols: u32,
-    intermediate_symbols: &SymbolSlab,
+    intermediate_symbols: &[Symbol],
     source_tuple: (u32, u32, u32, u32, u32, u32),
-) -> Symbol {
-    let mut data = vec![0u8; intermediate_symbols.symbol_size()];
-    enc_into(
-        &mut data,
-        source_block_symbols,
-        intermediate_symbols,
-        None,
-        source_tuple,
-    );
-    Symbol::new(data)
+) {
+    let w = num_lt_symbols(source_block_symbols);
+    let p = num_pi_symbols(source_block_symbols);
+    let p1 = calculate_p1(source_block_symbols);
+    let (d, a, mut b, d1, a1, mut b1) = source_tuple;
+
+    assert!(1 <= a && a < w);
+    assert!(b < w);
+    assert!(d1 == 2 || d1 == 3);
+    assert!(1 <= a1 && a < w);
+    assert!(b1 < w);
+
+    dest.copy_from_slice(intermediate_symbols[b as usize].as_bytes());
+    for _ in 1..d {
+        b = (b + a) % w;
+        add_assign(dest, intermediate_symbols[b as usize].as_bytes());
+    }
+
+    while b1 >= p {
+        b1 = (b1 + a1) % p1;
+    }
+
+    add_assign(dest, intermediate_symbols[(w + b1) as usize].as_bytes());
+
+    for _ in 1..d1 {
+        b1 = (b1 + a1) % p1;
+        while b1 >= p {
+            b1 = (b1 + a1) % p1;
+        }
+        add_assign(dest, intermediate_symbols[(w + b1) as usize].as_bytes());
+    }
 }
 
 #[cfg(feature = "std")]
@@ -832,7 +868,7 @@ mod tests {
             let tuple = intermediate_tuple(i, lt_symbols, sys_index, p1);
             let expected = enc(NUM_SYMBOLS, &intermediate_symbols, tuple);
             let mut buf = vec![0u8; SYMBOL_SIZE];
-            enc_into(&mut buf, NUM_SYMBOLS, &intermediate_symbols, None, tuple);
+            enc_into(&mut buf, NUM_SYMBOLS, &intermediate_symbols, tuple);
             assert_eq!(expected.as_bytes(), &buf[..], "mismatch at ESI {}", i);
         }
     }
